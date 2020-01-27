@@ -1,0 +1,374 @@
+---
+title: "Austin Animal Center Intake Data for Classification"
+author: "Wen Fu"
+date: "1/27/2020"
+output: html_document
+---
+
+Austin Animal Center (AAC), a no kill facility which manages to maintain 95% of the live outcome goal, is America's largest no-kill city. It has well maintained data sets, recording intake and outbound animals that processed through the center. 
+
+My goal in this project is to have a general idea of different conditions that a owner surrenders a pet and build models to predict on owners surrendering their dogs and cats to AAC
+
+
+###Data Exploration
+
+Source:  the dataset used was downloaded from AAC's data portal and was updated till April/09/2019.  
+
+Link: https://data.austintexas.gov/Health-and-Community-Services/Austin-Animal-Center-Intakes/wter-evkm
+
+Size:  the raw dataset contains 97,847 observations and 12 columns.
+
+####Load the Data into R
+```{r}
+library(data.table)
+#data loading takes about 18.5 to 22 seconds 
+system.time(aac_raw <- fread('~/desktop/UTD/CS4375/R/Project/Project2/Austin_Animal_Center_Intakes.csv', header = T,sep = "auto"))
+names(aac_raw)
+str(aac_raw)
+```
+
+
+####Clean Animal Type
+<p>In the raw data, DateTime, MonthYear, Breed and Color columns are not selected due to large amount of unique values, extremely hard to convert to factor, numeric or categorical values.</p>  
+
+<p>Change column names since the original predictors have space between words, now connect words with "_"<p>  
+
+<p>Animals of interest: dogs and cats, remove other animal types</p>
+ 
+```{r}
+aac <- aac_raw[,c(2,6:10)]
+names(aac)[2] <- "Intake_Type"
+names(aac)[3] <- "Intake_Condition"
+names(aac)[4] <- "Animal_Type"
+names(aac)[5] <- "Sex_upon_Intake"
+names(aac)[6] <- "Age_upon_Intake"
+
+str(aac)
+
+
+#check how many unique values in "Animal Type"
+unique(aac$Animal_Type)
+
+#remove rows with Animal_Type = "other"
+other <- which(grepl('Other', aac$Animal_Type))
+aac_other_rm <- aac[-other,]
+
+#remove rows of livestock
+livestock <- which(grepl('Livestock', aac_other_rm$Animal_Type))
+aac_ls_rm <- aac_other_rm[-livestock,]
+
+#remove rows of birds
+bird <- which(grepl('Bird', aac_ls_rm$Animal_Type))
+aac_bird_rm <- aac_ls_rm[-bird,]
+
+aac_bird_rm$Animal_Type <- as.factor(aac_bird_rm$Animal_Type)
+
+#double check only dogs and cats left in animals
+unique(aac_bird_rm$Animal_Type)
+#names(aac_bird_rm)
+
+```
+
+
+
+####Clean Name
+An animal with a name have a factor True(suggesting its previous contact with human) in name column, otherwise False  
+
+```{r}
+aac_bird_rm$Name <- gsub(".+", "1", aac_bird_rm$Name,ignore.case = TRUE)
+aac_bird_rm$Name <- as.integer(ifelse(aac_bird_rm$Name == '1', 1 , 0))
+aac_bird_rm$Name <- as.factor(aac_bird_rm$Name)
+
+#unique(aac_bird_rm$Name)
+```
+
+
+
+####Clean "Intake_Condition"
+Row with Intake Condition = "Other" does not give much information in terms of Intake condition and only counts a fraction of the whole data, thus removed
+```{r}
+unique(aac_bird_rm$Intake_Condition)
+
+#remove all the row with Intake Condition = "Other" 
+other_condition <- which(grepl('Other', aac_bird_rm$Intake_Condition))
+aac_other_rm <- aac_bird_rm[-other_condition,]
+
+aac_other_rm$Intake_Condition <- as.factor(aac_other_rm$Intake_Condition)
+
+#str(aac_other_rm$Intake_Condition)
+```
+
+
+####Clean the Target Variable "Intake_Type"
+Intake animals that fall under "Public Assist" and "Euthanasia Request" are not in the scope of project.  
+
+<p>Animals under "Owner Surrender" will be assigned 1 (True) and 0(False) otherwise. The other Intake_type left in the category is "Stray". Animals may or may not be surrendered/abandoned in the form of stray, there is no way to distinguish the real stray and the homeless/abandoned stray, therefore, stray animals get a 0, and will be categorized as not surrendered by owner.</p>
+ 
+```{r}
+#these are the intake types start with
+unique(aac_other_rm$Intake_Type)
+
+owner_surrender <-which((grepl("Owner Surrender",aac_other_rm$Intake_Type)))
+
+stray <- which((grepl("Stray",aac_other_rm$Intake_Type)))
+
+public_assist <- which((grepl("Public Assist",aac_other_rm$Intake_Type)))
+
+aac_p_assist_rm <- aac_other_rm[-public_assist,]
+
+e_request <- which((grepl("Euthanasia Request",aac_p_assist_rm$`Intake_Type`))) 
+
+
+aac_intake_cleaned <- aac_p_assist_rm[-e_request,]
+
+aac_intake_cleaned$Intake_Type <- as.factor(ifelse(aac_intake_cleaned$Intake_Type == "Owner Surrender", 1, 0))
+
+#unique(aac_intake_cleaned$`Intake Type`)
+```
+
+
+####Clean "Sex_upon_Intake"
+Remove rows with "NULL" and "UNKNOWN" in the Sex_upon_Intake column, and covert Sex_upon_Intake to factor
+
+```{r}
+
+#unique(aac_intake_cleaned$Sex_upon_Intake)
+null_row <- which(grepl("NULL", aac_intake_cleaned$Sex_upon_Intake))
+aac_intake_cleaned <- aac_intake_cleaned[-null_row,]
+
+unknown_row <- which(aac_intake_cleaned$Sex_upon_Intake == 'Unknown')
+aac_intake_cleaned <- aac_intake_cleaned[-unknown_row,]
+
+aac_intake_cleaned$Sex_upon_Intake <- as.factor(aac_intake_cleaned$Sex_upon_Intake)
+
+unique(aac_intake_cleaned$Sex_upon_Intake)
+
+```
+
+
+####Clean Age
+Animals that are several days old, their ages will be assigned to 0.01 which is an average 3.65 days converted to year.
+
+<p>Similar strategy is applied to convert animals that are a few weeks/months old.</p> 
+
+<p>After all non-year ages are cleaned, remove "year" or "years" from original age, leaving all number in the column. Convert to factors, and this generates 26 categorical factors</p>  
+
+
+```{r}
+
+#clean newborns' age
+days <- which(grepl('days|day', aac_intake_cleaned$Age_upon_Intake))
+newborn <- aac_intake_cleaned[days,]
+wo_newborn <- aac_intake_cleaned[-days,]
+newborn$Age_upon_Intake <- "0.01"
+
+#clean age for several-weeks-olds
+weeks <- which(grepl('weeks|week', wo_newborn$Age_upon_Intake))
+a_few_weeks <- wo_newborn[weeks,]
+wo_weeks <- wo_newborn[-weeks,]
+a_few_weeks$Age_upon_Intake <- "0.09"
+
+#clean age for several-month-olds
+months <- which(grepl('months|month', wo_weeks$Age_upon_Intake))
+less_than_1 <- wo_weeks[months,]
+just_years <- wo_weeks[-months,]
+less_than_1$Age_upon_Intake <- "0.75"
+
+#remove incorrect data such as negative age
+remove_negative <- which(grepl('-1 years', just_years$Age_upon_Intake))
+neg_rm <- just_years[-remove_negative,]
+
+#remove "year" or "years"
+neg_rm$Age_upon_Intake <- gsub(" year| years", "",neg_rm$Age_upon_Intake, ignore.case = TRUE )
+
+#combine all age groups
+total <- rbind(neg_rm,less_than_1,a_few_weeks,newborn)
+
+aac_intake_cleaned <- total
+
+aac_intake_cleaned$Age_upon_Intake <- as.factor(aac_intake_cleaned$Age_upon_Intake)
+
+#remove all rows with na. this is the final step of data cleaning
+na.exclude(aac_intake_cleaned)
+
+str(aac_intake_cleaned)
+unique(aac_intake_cleaned$Age_upon_Intake)
+anyNA(aac_intake_cleaned)
+
+```
+
+
+####Visual Explorations 
+Since all predictors are factors, using visual tools would make more sense to get a general idea of the data distribution.  
+
+<p>The graphs below explore the relations between 3 different predictors and the target "Intake_Type". In a way, I wanted to have an idea of the distribution of dogs and cats' being a stray or surrendered by their owners against different criteria: 1) whether they had previous contact with human, 2) their health status and 3) their ages.</p>
+
+
+```{r}
+
+attach(aac_intake_cleaned)
+par(mfrow=c(1,2))
+
+#This graph between Name(suggest if the animal has a name) and Intake_type explores 
+#the distibution of animal based on its previous experience with human and probability
+#of being surrendered by owner or being strays. dogs/cats with a name suggest their 
+#previous contact with human, otherwise false(this might be debatable)
+plot(Intake_Type~Name, col=c('darkorchid','gold')) 
+
+
+#The second graph shows the percentage of dogs/cats being stray/surrendered across 
+#the range of ages
+cdplot(Intake_Type~Age_upon_Intake, col=c('dodgerblue','darkorange'))
+
+par(mfrow=c(1,2))
+#The graph between Intake_condition and Intake_type shows the distribution of dogs/cats
+#against their health condition. The majority is "normal", which means normal health condition
+counts <- table(aac_intake_cleaned$Intake_Type,aac_intake_cleaned$Intake_Condition)
+barplot(counts,main="Intake_Condition by Intake_Type",col=c('darkorchid','gold'),
+        legend = c("Stray","Owner surrender"), las = 2, beside = TRUE)
+
+
+counts2 <- table(aac_intake_cleaned$Intake_Type,aac_intake_cleaned$Animal_Type)
+barplot(counts2,main="Dog/Cat Distribution by Intake_Type",col=c('dodgerblue','darkorange'),
+        legend = c("Stray","Owner surrender"), las = 2, beside = TRUE)
+
+detach(aac_intake_cleaned)
+```
+
+
+####Data splits into test and train 
+
+All 6 predictors will be kept to build models. 
+
+```{r}
+set.seed(2017)
+i <- sample(1:nrow(aac_intake_cleaned), 0.8*nrow(aac_intake_cleaned), replace = FALSE)
+train <- aac_intake_cleaned[i,]
+test <- aac_intake_cleaned[-i,]
+
+```
+
+
+####Logistic Regression 
+All predictors have been converted to factors, which is perfect for logistic regression. Plus logistic regression can handle large amount of data within reasonable amount of time.  
+
+<p>The algorithm learns to predict if a dog/cat is owner-surrendered based on its health status, age, sex and previous human contact.</p>  
+
+<p>Overall, the model does a good job separating classes, and it turns out to be the best model of all. All columns are confirmed to be significant by the glm summary. Some predictors have several significant factors.</p>  
+
+<p>The values in the dataset is not complex, and this may contribute to linear regression's best performance among all</p>
+
+```{r}
+glm1 <- glm(Intake_Type ~., data = train, family = binomial)
+summary(glm1)
+
+probs <- predict(glm1, newdata = test, type = "response")
+pred_glm <- ifelse(probs > .5, "1", "0")
+acc_glm <- mean((pred_glm == test$Intake_Type))
+print(paste("glm accuracy = ", acc_glm))
+
+ 
+```
+
+
+####Naive Bayes
+Although many of the predictors in the dataset are not independent, such as Name(suggest previous human contact) and Intake_condition, I thought it wont hurt to try Naive Bayes. After all, I'm hoping to see the PROBABILITY of a pet that is surrendered by its owner.  
+
+<p>The algorithm learns to predict the probability of a pet being surrendered by its owner by assuming all other predictors are independent.</p>  
+
+<p>The accuracy of the model is the lowest among all, around 75.5%, which may suggest that the independence among predictors does not hold.</p>
+
+```{r}
+library(e1071)
+nb1 <- naiveBayes(Intake_Type~., data=train)
+pred_nb <- predict(nb1, newdata=test, type="class")
+table(pred_nb,test$Intake_Type)
+acc_nb <- mean(pred_nb == test$Intake_Type)
+print(paste("NB accuracy = ", acc_nb))
+```
+
+
+####Sampling Data for Complex Models
+
+```{r}
+#sampling the data for complex data
+set.seed(1234)
+sample_col <- sample(1:nrow(aac_intake_cleaned), 0.1*nrow(aac_intake_cleaned), replace = FALSE)
+sample_data <- aac_intake_cleaned[sample_col,]
+j <- sample(3, nrow(sample_data),replace =TRUE, prob=c(.6, .2, .2))
+
+train2 <- sample_data[j==1,]
+test2 <- sample_data[j==2,]
+vald <- sample_data[j==3,]
+```
+
+
+####Decison Tree
+
+Choosing decision tree is just an experiment since there are only 5 predictors in the dataset. I assume it wont make much of a difference how nodes are spit.   
+
+<p>The algorithm learns to predict true or false based on the order/value it make split among nodes.</p>  
+
+<p>As expected, it did not outperform logistic regression with accuracy 78%. Tree pruning was not performed, since there aren't many branches presented in the original tree.</p>
+
+```{r}
+library(tree)
+tree_dt <- tree(Intake_Type~., data = train)
+summary(tree_dt)
+pred_dt <- predict(tree_dt, newdata = test, type = "class")
+acc_dt <- mean((pred_dt == test$Intake_Type),na.rm=TRUE)
+print(paste("decision tree accuracy = ", acc_dt))
+plot(tree_dt)
+text(tree_dt, cex= 0.5, pretty=0)
+```
+
+
+####Random Forest Bagging
+Since bagging generates the best result in the project for regression, I wanted to see its performance using logistic regression as a baseline.  
+
+<p>The algorithm learns to predict true or false by randomly selecting the next node at which to make a split.</p>  
+
+<p>Bagging has slightly better performance than decision tree, probably due to its random selection of next "split node." However, it does not outperform logistic regression. This might be that the simplicity of data. If predictors like "Breed" and "Color" were added, bagging might outperform glm.</p> 
+
+
+```{r}
+library(randomForest)
+tree_bagged <- randomForest(Intake_Type~., data=train2, importance = TRUE)
+tree_bagged 
+pred_randF <- predict(tree_bagged, newdata = test2)
+acc_randF <-mean((pred_randF == test2$Intake_Type),na.rm=TRUE)
+print(paste("Bagging accuracy = ", acc_randF))
+```
+
+
+###SVM
+
+I chose SVM as my last resort, hoping some model would get better result than glm. It usually takes very long to tune the model. However, its best.model might find some optimal cost to make better prediction.  
+
+<p>The algorithm learns to predict if a dog/cat is owner-surrendered based on its health status, age, sex and previous human contact.</p> 
+
+<p>Among all kernel model, the "linear" model generates the highest accuracy 78%, which again coined that the simple nature of the data.</p>
+```{r}
+tune.out <- tune(svm, Intake_Type~., data=vald, kernel="linear",
+ranges=list(cost=c(0.01, 0.1, 1, 5, 10, 50, 100)))
+summary(tune.out)
+
+#find the best model
+best_model <- tune.out$best.model
+
+#use best model for predication
+svm_cl <- predict(best_model,newdata = test2)
+
+acc_svm <- mean((svm_cl == test$Intake_Type))
+print(paste("SVM accuracy = ", acc_svm))
+
+
+```
+
+
+
+
+
+
+
+
